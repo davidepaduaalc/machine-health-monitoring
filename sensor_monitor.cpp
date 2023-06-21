@@ -7,9 +7,39 @@
 #include "json.hpp" // json handling
 #include "mqtt/client.h" // paho mqtt
 #include <iomanip>
+#include <sys/statvfs.h>
+#include <fstream>
+#include <string>
 
 #define QOS 1
 #define BROKER_ADDRESS "tcp://localhost:1883"
+
+
+float getCPUUsage() {
+    std::ifstream procFile("/proc/stat");
+    if (!procFile.is_open()) {
+        std::cerr << "Failed to open /proc/stat" << std::endl;
+        return -1;
+    }
+
+    std::string line;
+    std::getline(procFile, line);
+
+    // Extrai os valores dos campos relevantes
+    unsigned long long user, nice, system, idle, iowait, irq, softirq, steal, guest, guest_nice;
+    sscanf(line.c_str(), "cpu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu",
+           &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal, &guest, &guest_nice);
+
+    // Calcula a quantidade total de tempo gasto pela CPU
+    unsigned long long totalIdle = idle + iowait;
+    unsigned long long totalNonIdle = user + nice + system + irq + softirq + steal;
+    unsigned long long total = totalIdle + totalNonIdle;
+
+    // Calcula a porcentagem de uso da CPU
+    double cpuUsage = (static_cast<double>(totalNonIdle) / total) * 100.0;
+
+    return static_cast<double>(cpuUsage);
+}
 
 int main(int argc, char* argv[]) {
     std::string clientId = "sensor-monitor";
@@ -33,6 +63,18 @@ int main(int argc, char* argv[]) {
     gethostname(hostname, 1024);
     std::string machineId(hostname);
 
+    nlohmann::json j_initial;
+    j_initial["machine_id"] = machineId;
+    j_initial["sensors"][ "sensor_id"] = "0x32";
+    j_initial["sensors"][ "data_type"] = "float";
+    j_initial["sensors"][ "data_interval"] = 2;
+
+    // Publish the JSON message to the appropriate topic.
+    std::string topic = "/sensor_monitors";
+    mqtt::message msg(topic, j_initial.dump(), QOS, false);
+    std::clog << "message published - topic: " << topic << " - message: " << j_initial.dump() << std::endl;
+    client.publish(msg);
+
     while (true) {
        // Get the current time in ISO 8601 format.
         auto now = std::chrono::system_clock::now();
@@ -43,7 +85,8 @@ int main(int argc, char* argv[]) {
         std::string timestamp = ss.str();
 
         // Generate a random value.
-        int value = rand();
+
+        float value = getCPUUsage();
 
         // Construct the JSON message.
         nlohmann::json j;
@@ -51,7 +94,7 @@ int main(int argc, char* argv[]) {
         j["value"] = value;
 
         // Publish the JSON message to the appropriate topic.
-        std::string topic = "/sensors/" + machineId + "/rand";
+        std::string topic = "/sensors/" + machineId + "/disk";
         mqtt::message msg(topic, j.dump(), QOS, false);
         std::clog << "message published - topic: " << topic << " - message: " << j.dump() << std::endl;
         client.publish(msg);
