@@ -7,9 +7,18 @@
 #include <mongoc.h>
 #include "json.hpp" 
 #include "mqtt/client.h" 
+#include <map>
+#include <deque>
+
 
 #define QOS 1
 #define BROKER_ADDRESS "tcp://localhost:1883"
+
+std::map<std::string, std::deque<float>> sensor_datas;
+
+std::map<std::string,std::string> last_data;
+
+const int MAX_ELEMENTOS = 10;
 
 void insert_document(mongoc_collection_t *collection, std::string machine_id, std::string timestamp_str, int value) {
     bson_error_t error;
@@ -43,6 +52,63 @@ std::vector<std::string> split(const std::string &str, char delim) {
     return tokens;
 }
 
+
+void media(float value, std::string machine_id, std::string sensor_id) {
+    float sum = 0.0;
+    int tam = 0;
+    if (sensor_datas[sensor_id].size() < 6) {
+        return;
+    }
+    for (const auto& data_value : sensor_datas[sensor_id]) {
+        sum = sum + data_value;
+        tam++;
+    }
+    float media = sum / tam;
+    if (value < 0.8 * media && value > 1.2 * media) {
+        // Create an MQTT client for publishing
+        std::string brokerAddress = "tcp://localhost:1883";
+        std::string clientId = "publisherClient";
+        mqtt::client pubClient(brokerAddress, clientId);
+
+        // Connect to the MQTT broker
+        mqtt::connect_options connOpts;
+        connOpts.set_keep_alive_interval(20);
+        connOpts.set_clean_session(true);
+
+        try {
+            pubClient.connect(connOpts);
+        } catch (mqtt::exception& e) {
+            std::cerr << "Error: " << e.what() << std::endl;
+            return ;
+        }
+
+        // Create the alarm message
+        nlohmann::json alarme;
+        alarme["machine_id"] = machine_id;
+        alarme["sensor_id"] = sensor_id;
+        alarme["description"] = "Valor anormal detectado!";
+
+        // Publish the JSON message to the appropriate topic
+        std::string topic = "/alarmes";
+        mqtt::message msg_alarme(topic, alarme.dump(), QOS, false);
+        std::clog << "message published - topic: " << topic << " - message: " << alarme.dump() << std::endl;
+        pubClient.publish(msg_alarme);
+
+        // Disconnect from the MQTT broker
+        pubClient.disconnect();
+
+    }
+    return;
+}
+
+void tempo_inativo(){
+
+
+
+
+
+}
+
 int main(int argc, char* argv[]) {
     std::string clientId = "clientId";
     mqtt::client client(BROKER_ADDRESS, clientId);
@@ -55,9 +121,10 @@ int main(int argc, char* argv[]) {
     // Create an MQTT callback.
     class callback : public virtual mqtt::callback {
         mongoc_database_t *db;
+        mqtt::client& client;
 
     public:
-        callback(mongoc_database_t *db) : db(db) {}
+        callback(mongoc_database_t *db,mqtt::client& client) : db(db), client(client) {}
 
         void message_arrived(mqtt::const_message_ptr msg) override {
             auto j = nlohmann::json::parse(msg->get_payload());
@@ -67,8 +134,21 @@ int main(int argc, char* argv[]) {
             std::string machine_id = topic_parts[2];
             std::string sensor_id = topic_parts[3];
 
+
             std::string timestamp = j["timestamp"];
-            int value = j["value"];
+            float value = j["value"];
+            
+            media(value,machine_id,sensor_id);
+
+            if(sensor_datas.size() > MAX_ELEMENTOS){
+                sensor_datas[sensor_id].pop_front();
+            }
+            sensor_datas[sensor_id].push_back(value);
+
+            
+            std::cout << "Valor: " << sensor_datas[sensor_id][0] << std::endl;
+            std::cout << "Data: " << timestamp << std::endl;
+        
 
             // Get collection and persist the document.
             mongoc_collection_t *collection = mongoc_database_get_collection(db, sensor_id.c_str());
@@ -77,7 +157,8 @@ int main(int argc, char* argv[]) {
         }
     };
 
-    callback cb(database);
+
+    callback cb(database,client);
     client.set_callback(cb);
 
     // Connect to the MQTT broker.
